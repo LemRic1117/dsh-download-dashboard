@@ -19,6 +19,13 @@ window.__ModuleLoader__.load({
     const MIN_BYTES = 300 * 1024 * 1024
     /** A finished row lingers this long, then leaves the panel. */
     const LINGER_MS = 5 * 60 * 1000
+    /**
+     * An entry that still claims to run but has not been rewritten for this long
+     * counts as interrupted: a killed or crashed downloader leaves its last
+     * snapshot behind, and that record must not pose as live progress. A record
+     * that resumes simply goes back to looking live.
+     */
+    const ACTIVE_STALE_MS = 90 * 1000
     /** Poll cadence: fast while something is running, slow while idle. */
     const POLL_ACTIVE_MS = 1500
     const POLL_IDLE_MS = 6000
@@ -87,20 +94,44 @@ window.__ModuleLoader__.load({
      * @param now - current epoch milliseconds.
      * @returns whether to show it.
      */
+    /**
+     * Age of a record, or Infinity when its timestamp cannot be read.
+     * @param entry - a download entry.
+     * @param now - current epoch milliseconds.
+     * @returns age in milliseconds.
+     */
+    function ageOf(entry, now) {
+      const updated = Date.parse(String((entry && entry.updatedAt) || ''))
+      return Number.isFinite(updated) ? now - updated : Number.POSITIVE_INFINITY
+    }
+
+    /**
+     * The status to render. A record that still claims to run but has gone quiet
+     * is reported as interrupted, because its writer may have been killed.
+     * @param entry - a download entry.
+     * @param now - current epoch milliseconds.
+     * @returns the status to show.
+     */
+    function shownStatus(entry, now) {
+      const status = String((entry && entry.status) || '')
+      if (ACTIVE.indexOf(status) < 0) return status
+      return ageOf(entry, now) > ACTIVE_STALE_MS ? 'interrupted' : status
+    }
+
     function isVisible(entry, now) {
       if (!entry || typeof entry !== 'object') return false
-      const status = String(entry.status || '')
-      const active = ACTIVE.indexOf(status) >= 0
-      if (!active) {
-        const updated = Date.parse(String(entry.updatedAt || ''))
-        // An unreadable timestamp counts as expired: a truncated record must not
-        // become a row that no cleanup path ever removes.
-        if (!Number.isFinite(updated) || now - updated > LINGER_MS) return false
+      const age = ageOf(entry, now)
+      const live = ACTIVE.indexOf(String(entry.status || '')) >= 0 && age <= ACTIVE_STALE_MS
+      if (!live) {
+        // Finished, failed or abandoned: the linger clock runs from its last write.
+        // An unreadable timestamp counts as expired, so a truncated record can
+        // never become a row that no cleanup path removes.
+        if (!(age <= LINGER_MS)) return false
       }
       const total = entry.totalBytes
       if (typeof total === 'number' && Number.isFinite(total)) return total >= MIN_BYTES
       // A chunked response reports no length; only an in-flight one can still turn out large.
-      return active
+      return live
     }
 
     /**
@@ -132,12 +163,14 @@ window.__ModuleLoader__.load({
 .ddw-dot[data-status="running"],.ddw-dot[data-status="retrying"],.ddw-dot[data-status="starting"]{background:var(--dsw-alias-brand-primary);}
 .ddw-dot[data-status="done"]{background:var(--dsw-alias-state-success-primary);}
 .ddw-dot[data-status="failed"]{background:var(--dsw-alias-state-error-primary);}
+.ddw-dot[data-status="interrupted"]{background:var(--dsw-alias-state-warn-primary);}
 .ddw-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;}
 .ddw-pct{flex:none;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;font-variant-numeric:tabular-nums;}
 .ddw-track{height:4px;border-radius:2px;background:color-mix(in srgb,var(--dsw-alias-label-primary) 12%,transparent);overflow:hidden;}
 .ddw-fill{height:100%;border-radius:2px;background:var(--dsw-alias-brand-primary);transition:width var(--ds-transition-duration) var(--ds-ease-in-out);}
 .ddw-fill[data-status="done"]{background:var(--dsw-alias-state-success-primary);}
 .ddw-fill[data-status="failed"]{background:var(--dsw-alias-state-error-primary);}
+.ddw-fill[data-status="interrupted"]{background:var(--dsw-alias-state-warn-primary);}
 .ddw-meta{display:flex;align-items:center;gap:6px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
 .ddw-sep{color:var(--dsw-alias-border-l2);}
 .ddw-pill{pointer-events:auto;display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-soft);color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;cursor:pointer;font-family:inherit;font-variant-numeric:tabular-nums;}
@@ -357,8 +390,9 @@ window.__ModuleLoader__.load({
           '↓ ' + visible.length + ' 个下载',
         )
       } else {
+        const at = Date.now()
         const rows = visible.map((entry) => {
-          const status = String(entry.status || '')
+          const status = shownStatus(entry, at)
           const percent = percentOf(entry)
           const name = String(entry.name || entry.url || '下载')
           const meta = []
@@ -366,6 +400,8 @@ window.__ModuleLoader__.load({
             meta.push('已完成', fmtBytes(entry.totalBytes))
           } else if (status === 'failed') {
             meta.push('失败', String(entry.error || '未知原因'))
+          } else if (status === 'interrupted') {
+            meta.push('已中断', fmtBytes(entry.doneBytes) + (typeof entry.totalBytes === 'number' ? ' / ' + fmtBytes(entry.totalBytes) : ''))
           } else {
             meta.push(fmtBytes(entry.doneBytes) + (typeof entry.totalBytes === 'number' ? ' / ' + fmtBytes(entry.totalBytes) : ' / 大小未知'))
             meta.push(fmtSpeed(entry.speedBps))

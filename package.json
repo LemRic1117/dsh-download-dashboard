@@ -1,6 +1,6 @@
 {
   "name": "dsh-download-dashboard",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "悬浮在 DSH 对话区右侧的大文件下载看板：任何遵守状态文件约定的下载器，无论跑在主会话、子代理还是你自己的终端里，都会被同一块浮窗看见。",
