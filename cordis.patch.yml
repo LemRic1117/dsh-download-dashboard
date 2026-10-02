@@ -1,0 +1,3 @@
+- insert:
+    - id: download-dashboard
+      name: 'dsh-download-dashboard'
